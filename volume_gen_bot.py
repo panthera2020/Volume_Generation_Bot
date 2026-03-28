@@ -1,7 +1,15 @@
 """
-Volume Generation Bot v1.0 - Panther Platform
+Volume Generation Bot v1.1 - Panther Platform
 Strategy: Maker-Maker Ping-Pong
-Target: $100K+ daily notional volume, capital preservation
+Target: $200K+ daily notional volume (real), capital preservation
+
+CHANGELOG v1.1:
+- FIX: daily_volume was double-counted (entry + exit). Now counted once per cycle.
+- FIX: stop_loss_pct (0.04%) was tighter than spread (0.05%) → stops always hit.
+       Raised to 0.25% (5x the spread), giving exit orders room to fill.
+- PERF: leverage 30→50, utilization 0.60→0.85 for higher notional per cycle.
+- PERF: cycle_pause 5s→1s, entry_timeout 90s→45s, pos_timeout 180s→90s.
+- MATH: With $150 @ 50x @ 85% util → $6,375 notional/cycle → ~31 cycles = $200k.
 """
 
 from __future__ import annotations
@@ -32,30 +40,42 @@ logger = logging.getLogger("VolumeGenBot")
 class BotConfig:
     # Exchange
     symbol: str = "BTC/USDT:USDT"       # Bybit USDT perpetual
-    leverage: int = 20
+    leverage: int = 50                   # FIX v1.1: 30 → 50 (more notional/cycle)
     margin_mode: str = "isolated"
 
     # Volume
-    daily_volume_target: float = 100_000.0   # $100K daily target
+    # FIX v1.1: Raised to 200k to compensate for fixing the double-count bug.
+    # Previously the bot counted volume TWICE per cycle (entry + exit), so it
+    # stopped at ~$50k real notional when it thought it had hit $100k.
+    # Now volume is counted once per completed cycle. $200k = $200k real.
+    daily_volume_target: float = 200_000.0
 
     # Position sizing
-    position_utilization: float = 0.60       # Use 60% of max leverage capacity
+    # FIX v1.1: 0.60 → 0.85 — deploy more capital per cycle
+    position_utilization: float = 0.85
 
     # Strategy parameters
     entry_offset_pct: float = 0.015          # Enter 0.015% from mid price
     spread_pct: float = 0.05                 # Target 0.05% spread (covers 0.04% fees + buffer)
-    entry_timeout_sec: int = 90              # Cancel entry if not filled in 90s
-    position_timeout_sec: int = 180          # Close position after 3 min max hold
+    # FIX v1.1: entry_timeout 90→45s — cancel stale entries faster, keep cycling
+    entry_timeout_sec: int = 45
+    # FIX v1.1: position_timeout 180→90s — faster turnover
+    position_timeout_sec: int = 90
 
     # Risk management
-    stop_loss_pct: float = 0.04              # 0.04% stop loss per trade
+    # FIX v1.1: stop_loss_pct 0.04% → 0.25%.
+    # Previous value (0.04%) was TIGHTER than the spread (0.05%), meaning stops
+    # were being triggered before exit limit orders had any chance to fill.
+    # 0.25% = 5x the spread — healthy ratio, still tight for capital protection.
+    stop_loss_pct: float = 0.25
     max_daily_loss_pct: float = 0.015        # 1.5% max daily drawdown
     max_consecutive_losses: int = 5          # Pause after 5 consecutive stops
     cooldown_after_loss_sec: int = 30        # 30s cooldown after a stop hit
 
     # Execution
     poll_interval_sec: float = 0.5           # Check order status every 500ms
-    cycle_pause_sec: float = 5.0             # Pause between cycles
+    # FIX v1.1: cycle_pause 5.0s → 1.0s — faster cycling between rounds
+    cycle_pause_sec: float = 1.0
     max_market_spread_pct: float = 0.20      # Skip if book spread > 0.20%
 
     # Fees (Bybit VIP 0 maker rate)
@@ -253,6 +273,12 @@ class VolumeGenBot:
         One ping-pong cycle.
         If _next_is_long=True:  BUY entry -> SELL exit
         If _next_is_long=False: SELL entry -> BUY exit (short cycle)
+
+        FIX v1.1: daily_volume is now counted ONCE per completed cycle
+        (at the end of Phase 2), not twice. Previously it was incremented
+        at both Phase 1 (entry fill) and Phase 2 (exit/stop/timeout), which
+        caused the bot to believe it had hit the volume target with only
+        half the real notional traded.
         """
         mid = self._get_mid_price()
 
@@ -284,6 +310,7 @@ class VolumeGenBot:
             else (1 - self.config.spread_pct / 100)
 
         # Stop price: entry - stop (long) or entry + stop (short)
+        # FIX v1.1: stop_loss_pct is now 0.25% (was 0.04% — tighter than spread!)
         stop_mult = (1 - self.config.stop_loss_pct / 100) if is_long \
             else (1 + self.config.stop_loss_pct / 100)
 
@@ -324,8 +351,10 @@ class VolumeGenBot:
             logger.info("Entry timeout, cancelled")
             return
 
-        # Entry filled
-        self.daily_volume += notional
+        # NOTE: Do NOT count daily_volume here.
+        # FIX v1.1: Volume is counted ONCE at end of cycle (Phase 2 conclusion).
+        # The old code added notional here AND again in every exit path — double-counting.
+
         exit_price = actual_entry * spread_mult
         stop_price = actual_entry * stop_mult
 
@@ -340,8 +369,10 @@ class VolumeGenBot:
         except Exception as e:
             logger.error(f"Exit order failed: {e}, closing at market")
             self._close_position()
+            # Count the round-trip volume (entry side only, no clean exit)
             self.daily_volume += notional
             self.trade_count += 1
+            self._next_is_long = not self._next_is_long
             return
 
         t0 = time.time()
@@ -373,11 +404,12 @@ class VolumeGenBot:
             if stop_hit:
                 self._cancel(exit_order["id"])
                 self._close_position()
-                # Estimate loss: stop distance + taker fee on exit
+                # Estimate loss: stop distance + taker fee on exit + maker fee on entry
                 loss = notional * (self.config.stop_loss_pct / 100) + \
                     notional * self.config.taker_fee_rate + \
                     notional * self.config.maker_fee_rate
                 self.daily_pnl -= loss
+                # FIX v1.1: count volume once here (was also counted at entry before)
                 self.daily_volume += notional
                 self.trade_count += 1
                 self.loss_count += 1
@@ -399,29 +431,31 @@ class VolumeGenBot:
             fees = notional * self.config.maker_fee_rate * 2
             net = gross - fees
             self.daily_pnl += net
+            # FIX v1.1: count volume ONCE (both sides of the round trip = 1x notional)
             self.daily_volume += notional
             self.trade_count += 1
             self.win_count += 1
             self.consecutive_losses = 0
             logger.info(
                 f"EXIT FILLED | Net: ${net:.4f} | "
-                f"Daily vol: ${self.daily_volume:,.0f} | "
+                f"Daily vol: ${self.daily_volume:,.0f} / ${self.config.daily_volume_target:,.0f} | "
                 f"PnL: ${self.daily_pnl:.2f} | "
                 f"W/L: {self.win_count}/{self.loss_count}"
             )
         else:
-            # Position timeout
+            # Position timeout — market-close to free up capital for next cycle
             self._cancel(exit_order["id"])
             self._close_position()
-            # Timeout exit is roughly breakeven (taker fee on close)
+            # Timeout exit is roughly breakeven (taker fee on close, maker on entry)
             timeout_cost = notional * self.config.taker_fee_rate + \
                 notional * self.config.maker_fee_rate
             self.daily_pnl -= timeout_cost
+            # FIX v1.1: count volume once here
             self.daily_volume += notional
             self.trade_count += 1
             logger.info(
                 f"TIMEOUT | Closed at market | Cost: ~${timeout_cost:.2f} | "
-                f"Daily vol: ${self.daily_volume:,.0f}"
+                f"Daily vol: ${self.daily_volume:,.0f} / ${self.config.daily_volume_target:,.0f}"
             )
 
         # Alternate direction for next cycle
@@ -444,14 +478,18 @@ class VolumeGenBot:
         self._equity_live = self._get_equity()
         self._reset_day_if_needed()
 
+        max_notional = self._equity_live * self.config.leverage * self.config.position_utilization
+        cycles_needed = self.config.daily_volume_target / max_notional
         logger.info(
-            f"Volume Gen Bot STARTED | "
+            f"Volume Gen Bot v1.1 STARTED | "
             f"Symbol: {self.config.symbol} | "
             f"Equity: ${self._equity_live:.2f} | "
             f"Leverage: {self.config.leverage}x | "
-            f"Max position: ${self._equity_live * self.config.leverage * self.config.position_utilization:,.0f} | "
+            f"Max notional/cycle: ${max_notional:,.0f} | "
             f"Daily target: ${self.config.daily_volume_target:,.0f} | "
-            f"Spread: {self.config.spread_pct:.3f}%"
+            f"Cycles needed: {cycles_needed:.1f} | "
+            f"Spread: {self.config.spread_pct:.3f}% | "
+            f"Stop: {self.config.stop_loss_pct:.3f}%"
         )
 
         if self._equity_live < 50:
@@ -510,11 +548,11 @@ def main():
 
     config = BotConfig(
         symbol=os.getenv("BOT_SYMBOL", "BTC/USDT:USDT"),
-        leverage=int(os.getenv("BOT_LEVERAGE", "30")),
-        daily_volume_target=float(os.getenv("BOT_VOLUME_TARGET", "100000")),
+        leverage=int(os.getenv("BOT_LEVERAGE", "50")),
+        daily_volume_target=float(os.getenv("BOT_VOLUME_TARGET", "200000")),
         spread_pct=float(os.getenv("BOT_SPREAD_PCT", "0.05")),
-        stop_loss_pct=float(os.getenv("BOT_STOP_LOSS_PCT", "0.04")),
-        position_utilization=float(os.getenv("BOT_UTILIZATION", "0.60")),
+        stop_loss_pct=float(os.getenv("BOT_STOP_LOSS_PCT", "0.25")),
+        position_utilization=float(os.getenv("BOT_UTILIZATION", "0.85")),
     )
 
     bot = VolumeGenBot(config, api_key, secret)
