@@ -32,7 +32,7 @@ logger = logging.getLogger("VolumeGenBot")
 class BotConfig:
     # Exchange
     symbol: str = "BTC/USDT:USDT"       # Bybit USDT perpetual
-    leverage: int = 30
+    leverage: int = 20
     margin_mode: str = "isolated"
 
     # Volume
@@ -48,8 +48,8 @@ class BotConfig:
     position_timeout_sec: int = 180          # Close position after 3 min max hold
 
     # Risk management
-    stop_loss_pct: float = 0.10              # 0.10% stop loss per trade
-    max_daily_loss_pct: float = 0.03         # 3% max daily drawdown
+    stop_loss_pct: float = 0.04              # 0.04% stop loss per trade
+    max_daily_loss_pct: float = 0.015        # 1.5% max daily drawdown
     max_consecutive_losses: int = 5          # Pause after 5 consecutive stops
     cooldown_after_loss_sec: int = 30        # 30s cooldown after a stop hit
 
@@ -513,7 +513,7 @@ def main():
         leverage=int(os.getenv("BOT_LEVERAGE", "30")),
         daily_volume_target=float(os.getenv("BOT_VOLUME_TARGET", "100000")),
         spread_pct=float(os.getenv("BOT_SPREAD_PCT", "0.05")),
-        stop_loss_pct=float(os.getenv("BOT_STOP_LOSS_PCT", "0.10")),
+        stop_loss_pct=float(os.getenv("BOT_STOP_LOSS_PCT", "0.04")),
         position_utilization=float(os.getenv("BOT_UTILIZATION", "0.60")),
     )
 
