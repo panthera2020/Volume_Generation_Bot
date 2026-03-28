@@ -57,14 +57,14 @@ else:
         daily_volume_target=float(os.getenv("BOT_VOLUME_TARGET", "100000")),
         spread_pct=float(os.getenv("BOT_SPREAD_PCT", "0.05")),
         stop_loss_pct=float(os.getenv("BOT_STOP_LOSS_PCT", "0.10")),
-        max_daily_drawdown_pct=float(os.getenv("BOT_MAX_DD_PCT", "3.0")),
+        max_daily_loss_pct=float(os.getenv("BOT_MAX_DD_PCT", "0.03")),
         max_consecutive_losses=int(os.getenv("BOT_MAX_CONSEC_LOSSES", "5")),
-        cooldown_after_stop=float(os.getenv("BOT_COOLDOWN", "30")),
-        entry_timeout=float(os.getenv("BOT_ENTRY_TIMEOUT", "90")),
-        position_timeout=float(os.getenv("BOT_POS_TIMEOUT", "180")),
-        equity_utilization=float(os.getenv("BOT_UTILIZATION", "0.60")),
+        cooldown_after_loss_sec=int(os.getenv("BOT_COOLDOWN", "30")),
+        entry_timeout_sec=int(os.getenv("BOT_ENTRY_TIMEOUT", "90")),
+        position_timeout_sec=int(os.getenv("BOT_POS_TIMEOUT", "180")),
+        position_utilization=float(os.getenv("BOT_UTILIZATION", "0.60")),
     )
-    bot = VolumeGenBot(cfg)
+    bot = VolumeGenBot(cfg, api_key, api_secret)
 
 
 def _require_bot() -> VolumeGenBot:
@@ -80,13 +80,12 @@ def _require_bot() -> VolumeGenBot:
 @app.post("/bot/start", response_model=BotActionResponse)
 def start_bot(payload: StartBotRequest) -> BotActionResponse:
     b = _require_bot()
-    # Override config if provided
     if payload.symbol:
-        b.cfg.symbol = payload.symbol
+        b.config.symbol = payload.symbol
     if payload.leverage:
-        b.cfg.leverage = payload.leverage
+        b.config.leverage = payload.leverage
     if payload.volume_target:
-        b.cfg.daily_volume_target = payload.volume_target
+        b.config.daily_volume_target = payload.volume_target
     b.run()
     return BotActionResponse(status="ok")
 
@@ -94,21 +93,21 @@ def start_bot(payload: StartBotRequest) -> BotActionResponse:
 @app.post("/bot/stop", response_model=BotActionResponse)
 def stop_bot() -> BotActionResponse:
     b = _require_bot()
-    b._shutdown = True
+    b.running = False
     return BotActionResponse(status="ok")
 
 
 @app.post("/bot/pause", response_model=BotActionResponse)
 def pause_bot() -> BotActionResponse:
     b = _require_bot()
-    b._paused = True
+    b.running = False
     return BotActionResponse(status="ok")
 
 
 @app.post("/bot/resume", response_model=BotActionResponse)
 def resume_bot() -> BotActionResponse:
     b = _require_bot()
-    b._paused = False
+    b.run()
     return BotActionResponse(status="ok")
 
 
@@ -121,23 +120,23 @@ def bot_status() -> dict:
         }
 
     return {
-        "state": "PAUSED" if getattr(bot, "_paused", False) else (
-            "RUNNING" if not getattr(bot, "_shutdown", True) else "STOPPED"
-        ),
-        "symbol": bot.cfg.symbol,
-        "leverage": bot.cfg.leverage,
-        "equity": getattr(bot, "_equity", 0),
-        "daily_volume": getattr(bot, "_daily_volume", 0),
-        "daily_volume_target": bot.cfg.daily_volume_target,
+        "state": "RUNNING" if bot.running else "STOPPED",
+        "symbol": bot.config.symbol,
+        "leverage": bot.config.leverage,
+        "equity": bot._equity_live,
+        "daily_volume": bot.daily_volume,
+        "daily_volume_target": bot.config.daily_volume_target,
         "volume_pct": round(
-            getattr(bot, "_daily_volume", 0) / bot.cfg.daily_volume_target * 100, 1
-        ) if bot.cfg.daily_volume_target else 0,
-        "round_trips": getattr(bot, "_round_trips", 0),
-        "total_fees": getattr(bot, "_total_fees", 0),
-        "consecutive_losses": getattr(bot, "_consec_losses", 0),
-        "daily_pnl": getattr(bot, "_daily_pnl", 0),
-        "spread_pct": bot.cfg.spread_pct,
-        "stop_loss_pct": bot.cfg.stop_loss_pct,
-        "last_direction": getattr(bot, "_last_direction", "—"),
-        "last_error": getattr(bot, "_last_error", None),
+            bot.daily_volume / bot.config.daily_volume_target * 100, 1
+        ) if bot.config.daily_volume_target else 0,
+        "round_trips": bot.trade_count,
+        "total_fees": round(bot.daily_volume * bot.config.maker_fee_rate * 2, 4),
+        "consecutive_losses": bot.consecutive_losses,
+        "daily_pnl": round(bot.daily_pnl, 4),
+        "spread_pct": bot.config.spread_pct,
+        "stop_loss_pct": bot.config.stop_loss_pct,
+        "last_direction": "LONG" if bot._next_is_long else "SHORT",
+        "win_count": bot.win_count,
+        "loss_count": bot.loss_count,
+        "last_error": None,
     }
