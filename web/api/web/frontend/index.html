@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Volume Gen Bot</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --card: #111827;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --danger: #f87171;
+      --ok: #34d399;
+      --warn: #fbbf24;
+    }
+    body { margin:0; font-family:"Segoe UI",system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--text); }
+    .container { max-width:1200px; margin:0 auto; padding:32px 20px 64px; }
+    header { display:flex; flex-direction:column; gap:8px; margin-bottom:24px; }
+    h1 { margin:0; font-size:28px; }
+    .card { background:var(--card); border-radius:12px; padding:20px; box-shadow:0 10px 25px rgba(0,0,0,0.2); }
+    .actions { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; }
+    button { border:none; border-radius:10px; padding:10px 16px; font-size:14px; cursor:pointer; background:var(--accent); color:#0f172a; font-weight:600; }
+    button.secondary { background:#334155; color:var(--text); }
+    button.danger { background:var(--danger); color:#0f172a; }
+    .status-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
+    .status-item { background:rgba(148,163,184,0.08); padding:12px; border-radius:10px; }
+    .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.06em; }
+    .value { font-size:18px; margin-top:6px; word-break:break-word; }
+    .pill { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+    .pill.ok { background:rgba(52,211,153,0.2); color:var(--ok); }
+    .pill.warn { background:rgba(251,191,36,0.2); color:var(--warn); }
+    .pill.off { background:rgba(248,113,113,0.2); color:var(--danger); }
+    .progress-bar { width:100%; height:8px; background:#1e293b; border-radius:4px; margin-top:8px; overflow:hidden; }
+    .progress-fill { height:100%; background:var(--accent); border-radius:4px; transition:width 0.5s ease; }
+    footer { margin-top:20px; font-size:12px; color:var(--muted); }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Volume Gen Bot</h1>
+    <div id="status-pill" class="pill off">OFFLINE</div>
+  </header>
+
+  <div class="card">
+    <div class="actions">
+      <button onclick="sendAction('start','POST')">Start</button>
+      <button class="secondary" onclick="sendAction('pause','POST')">Pause</button>
+      <button class="secondary" onclick="sendAction('resume','POST')">Resume</button>
+      <button class="danger" onclick="sendAction('stop','POST')">Stop</button>
+      <button class="secondary" onclick="refreshStatus()">Refresh</button>
+    </div>
+
+    <div class="status-grid">
+      <div class="status-item">
+        <div class="label">Symbol</div>
+        <div class="value" id="symbol">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Leverage</div>
+        <div class="value" id="leverage">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Equity</div>
+        <div class="value" id="equity">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Daily Volume</div>
+        <div class="value" id="daily-volume">-</div>
+        <div class="progress-bar"><div class="progress-fill" id="volume-bar" style="width:0%"></div></div>
+      </div>
+      <div class="status-item">
+        <div class="label">Volume Target</div>
+        <div class="value" id="volume-target">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Volume %</div>
+        <div class="value" id="volume-pct">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Round Trips</div>
+        <div class="value" id="round-trips">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Total Fees</div>
+        <div class="value" id="total-fees">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Daily PnL</div>
+        <div class="value" id="daily-pnl">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Consecutive Losses</div>
+        <div class="value" id="consec-losses">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Spread %</div>
+        <div class="value" id="spread-pct">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Stop Loss %</div>
+        <div class="value" id="stop-loss-pct">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Last Direction</div>
+        <div class="value" id="last-direction">-</div>
+      </div>
+      <div class="status-item">
+        <div class="label">Last Error</div>
+        <div class="value" id="last-error">-</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>API base: <span id="api-base">/</span></footer>
+</div>
+
+<script>
+const apiBase = "";
+document.getElementById("api-base").textContent = window.location.origin;
+
+async function sendAction(action, method) {
+  try {
+    await fetch(`${apiBase}/bot/${action}`, { method });
+    await refreshStatus();
+  } catch (e) { console.error("Action failed", e); }
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch(`${apiBase}/bot/status`);
+    const d = await r.json();
+
+    document.getElementById("symbol").textContent = d.symbol || "-";
+    document.getElementById("leverage").textContent = d.leverage ? d.leverage + "x" : "-";
+    document.getElementById("equity").textContent = fmt(d.equity);
+    document.getElementById("daily-volume").textContent = fmt(d.daily_volume);
+    document.getElementById("volume-target").textContent = fmt(d.daily_volume_target);
+    document.getElementById("volume-pct").textContent = d.volume_pct != null ? d.volume_pct + "%" : "-";
+    document.getElementById("volume-bar").style.width = Math.min(d.volume_pct || 0, 100) + "%";
+    document.getElementById("round-trips").textContent = d.round_trips ?? "-";
+    document.getElementById("total-fees").textContent = fmt(d.total_fees);
+    document.getElementById("daily-pnl").textContent = fmt(d.daily_pnl);
+    document.getElementById("consec-losses").textContent = d.consecutive_losses ?? "-";
+    document.getElementById("spread-pct").textContent = d.spread_pct != null ? d.spread_pct + "%" : "-";
+    document.getElementById("stop-loss-pct").textContent = d.stop_loss_pct != null ? d.stop_loss_pct + "%" : "-";
+    document.getElementById("last-direction").textContent = d.last_direction || "-";
+    document.getElementById("last-error").textContent = d.last_error || "-";
+
+    const pill = document.getElementById("status-pill");
+    if (d.state === "RUNNING") { pill.textContent = "RUNNING"; pill.className = "pill ok"; }
+    else if (d.state === "PAUSED") { pill.textContent = "PAUSED"; pill.className = "pill warn"; }
+    else { pill.textContent = d.state || "OFFLINE"; pill.className = "pill off"; }
+  } catch (e) { console.error("Status fetch failed", e); }
+}
+
+function fmt(v) {
+  if (v == null) return "-";
+  return Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+refreshStatus();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>
